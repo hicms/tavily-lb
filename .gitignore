@@ -1,0 +1,14 @@
+/target
+# Runtime state (contains API keys and the master key).
+/data
+config.toml
+keys.txt
+
+/web/node_modules
+/web/dist
+/web/*.tsbuildinfo
+/web/test-results
+/web/playwright-report
+/web/e2e/.tmp
+/web/e2e-live/.tmp
+/web/playwright-report-live

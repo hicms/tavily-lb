@@ -1,0 +1,104 @@
+[
+  {
+    "name": "tavily-search",
+    "description": "Execute a search query using Tavily Search (via the Tavily LB key pool). Returns ranked results and optional answer/raw_content/images/usage.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["query"],
+      "properties": {
+        "query": {"type": "string", "description": "The search query to execute with Tavily."},
+        "auto_parameters": {"type": "boolean", "default": false, "description": "Automatically configures search parameters based on the query. Explicit values override auto-selected ones. include_answer/include_raw_content/max_results must be set manually. May set search_depth=advanced (2 credits); set search_depth=basic to avoid extra cost."},
+        "topic": {"type": "string", "enum": ["general", "news", "finance"], "default": "general", "description": "Search topic/category. Use news for real-time updates; general for broad searches."},
+        "search_depth": {"type": "string", "enum": ["advanced", "basic", "fast", "ultra-fast"], "default": "basic", "description": "Relevance vs latency. basic/fast/ultra-fast cost 1 credit; advanced costs 2 credits."},
+        "chunks_per_source": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3, "description": "Max number of relevant chunks (each up to ~500 chars) per source. Used with search_depth=advanced."},
+        "max_results": {"type": "integer", "minimum": 0, "maximum": 20, "default": 5, "description": "The maximum number of search results to return."},
+        "time_range": {"type": "string", "enum": ["day", "week", "month", "year", "d", "w", "m", "y"], "description": "Filter results by publish/updated time window back from now."},
+        "start_date": {"type": "string", "format": "date", "description": "Return results after this date (YYYY-MM-DD)."},
+        "end_date": {"type": "string", "format": "date", "description": "Return results before this date (YYYY-MM-DD)."},
+        "country": {"type": "string", "description": "Boost results from a specific country (topic=general only), e.g. 'united states'."},
+        "include_domains": {"type": "array", "items": {"type": "string"}, "description": "Domains to specifically include (max 300)."},
+        "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "Domains to specifically exclude (max 150)."},
+        "include_images": {"type": "boolean", "default": false, "description": "Also perform an image search and include images in the response."},
+        "include_image_descriptions": {"type": "boolean", "default": false, "description": "When include_images is true, also add a descriptive text for each image."},
+        "include_answer": {"description": "Include an LLM-generated answer. true/basic: quick answer; advanced: more detailed.", "oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["basic", "advanced"]}], "default": false},
+        "include_raw_content": {"description": "Include cleaned page content per result. true/markdown: markdown; text: plain text.", "oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["markdown", "text"]}], "default": false},
+        "include_favicon": {"type": "boolean", "default": false, "description": "Include the favicon URL for each result."},
+        "include_usage": {"type": "boolean", "default": false, "description": "Include credit usage information in the response."}
+      }
+    }
+  },
+  {
+    "name": "tavily-extract",
+    "description": "Extract structured content from URLs (via the Tavily LB key pool).",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["urls"],
+      "properties": {
+        "urls": {"type": "array", "items": {"type": "string"}, "description": "URLs to extract content from."},
+        "extract_depth": {"type": "string", "enum": ["basic", "advanced"], "default": "basic", "description": "Depth of extraction."},
+        "format": {"type": "string", "enum": ["markdown", "text"], "default": "markdown", "description": "Output format for extracted content."},
+        "include_images": {"type": "boolean", "default": false, "description": "Include images."},
+        "include_image_descriptions": {"type": "boolean", "default": false, "description": "Include descriptions for extracted images."},
+        "include_favicon": {"type": "boolean", "default": false, "description": "Include favicon URL."},
+        "include_usage": {"type": "boolean", "default": false, "description": "Include credit usage information in the response."},
+        "include_domains": {"type": "array", "items": {"type": "string"}, "description": "Domains to include."},
+        "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "Domains to exclude."},
+        "country": {"type": "string", "description": "Prioritize content from a specific country (lowercase plain English)."}
+      }
+    }
+  },
+  {
+    "name": "tavily-crawl",
+    "description": "Crawl a website starting from a root URL (via the Tavily LB key pool).",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["url"],
+      "properties": {
+        "url": {"type": "string", "description": "Root URL to begin crawling."},
+        "instructions": {"type": "string", "description": "Natural language instructions for the crawler."},
+        "max_depth": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1, "description": "Max depth of crawl."},
+        "max_breadth": {"type": "integer", "minimum": 1, "default": 20, "description": "Max number of links to follow per level."},
+        "limit": {"type": "integer", "minimum": 1, "default": 50, "description": "Total number of pages to process."},
+        "select_paths": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to include specific paths."},
+        "select_domains": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to include specific domains."},
+        "exclude_paths": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to exclude paths."},
+        "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to exclude domains."},
+        "allow_external": {"type": "boolean", "default": true, "description": "Allow following external-domain links."},
+        "include_images": {"type": "boolean", "default": false, "description": "Include images discovered during crawling."},
+        "extract_depth": {"type": "string", "enum": ["basic", "advanced"], "default": "basic", "description": "Extraction depth for crawled pages."},
+        "format": {"type": "string", "enum": ["markdown", "text"], "default": "markdown", "description": "Format of extracted content."},
+        "include_favicon": {"type": "boolean", "default": false, "description": "Include favicon URL for each result."},
+        "include_usage": {"type": "boolean", "default": false, "description": "Include credit usage information in the response."}
+      }
+    }
+  },
+  {
+    "name": "tavily-map",
+    "description": "Map a website's URL structure (via the Tavily LB key pool).",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["url"],
+      "properties": {
+        "url": {"type": "string", "description": "Root URL to begin mapping."},
+        "instructions": {"type": "string", "description": "Natural language instructions for the crawler."},
+        "max_depth": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1, "description": "Max depth of mapping."},
+        "max_breadth": {"type": "integer", "minimum": 1, "default": 20, "description": "Max number of links to follow per level."},
+        "limit": {"type": "integer", "minimum": 1, "default": 50, "description": "Total number of links to process."},
+        "select_paths": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to include specific paths."},
+        "select_domains": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to include specific domains."},
+        "exclude_paths": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to exclude paths."},
+        "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "Regex patterns to exclude domains."},
+        "allow_external": {"type": "boolean", "default": true, "description": "Allow following external-domain links."}
+      }
+    }
+  },
+  {
+    "name": "tavily-usage",
+    "description": "Get aggregated usage/quota info for the whole key pool (local accounting, no upstream call).",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+  }
+]

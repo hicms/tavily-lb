@@ -1,0 +1,38 @@
+# tavily-lb configuration. Copy to config.toml (picked up automatically) or pass -c <path>.
+# Every value is optional; the defaults are shown. Environment variables override this file.
+# Durations accept "500ms", "30s", "10m", "1h", "1d" or a bare number of seconds.
+
+listen = "0.0.0.0:8080"                  # LISTEN_ADDR (or PORT)
+upstream_base_url = "https://api.tavily.com"  # TAVILY_BASE_URL
+
+# Per-attempt timeout and overall deadline for one client request (all failover attempts).
+upstream_timeout = "150s"                # UPSTREAM_TIMEOUT
+request_deadline = "180s"                # REQUEST_DEADLINE
+# Keys tried per request before giving up; 0 = try every usable key.
+max_attempts = 5                         # MAX_ATTEMPTS
+# How long a key that got HTTP 429 is moved to the back of the queue.
+cooldown_on_429 = "60s"                  # COOLDOWN_ON_429
+max_body_bytes = 10485760
+
+# Clients authenticate with this key (Bearer header, api_key query/body field).
+# At least 16 characters. When unset, a key is generated on first start, logged once
+# and stored in the state file.
+# master_key = "change-me-to-a-long-random-string"   # MASTER_KEY
+
+data_file = "./data/state.json"          # DATA_FILE
+# Optional file with one key per line (`key`, `key,alias` or `key,alias,total_quota`),
+# imported at startup; keys already in the pool are skipped.
+# keys_file = "./keys.txt"               # KEYS_FILE
+default_total_quota = 1000
+flush_interval = "10s"
+# Reset used quota on the first day of each month (local time).
+monthly_reset = true                     # MONTHLY_RESET
+
+admin_ui = true                          # ADMIN_UI  (web UI at /admin)
+mcp = true                               # MCP_ENABLED (MCP endpoint at /mcp)
+
+[usage_sync]
+# Periodically pull real usage from Tavily GET /usage for every key.
+enabled = false                          # USAGE_SYNC_ENABLED
+interval = "1h"                          # USAGE_SYNC_INTERVAL (minimum 60s)
+request_interval = "1s"                  # pause between keys during a sync

@@ -1,0 +1,4 @@
+# Astryx postinstall scripts only print a setup hint; skip them.
+allowBuilds:
+  '@astryxdesign/cli': false
+  '@astryxdesign/core': false

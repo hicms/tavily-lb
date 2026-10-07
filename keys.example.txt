@@ -1,0 +1,5 @@
+# One Tavily API key per line. Optional alias and monthly quota, comma separated.
+# Blank lines and lines starting with # are ignored.
+tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+tvly-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy,backup-account
+tvly-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz,paid-plan,4000

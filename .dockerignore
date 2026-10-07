@@ -1,0 +1,10 @@
+target
+data
+config.toml
+keys.txt
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+web/e2e/.tmp
+.git
