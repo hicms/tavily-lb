@@ -19,7 +19,8 @@
   | 其它状态码 | 直接返回给客户端 |
 
   每个请求最多尝试 `max_attempts` 个 Key（默认 5），总时长不超过 `request_deadline`（默认 180s）。都失败时返回：最后一个 429，或 `504 upstream_timeout`、`502 upstream_error`、`503 no_available_keys`。
-- **额度统计**：非 GET 请求得到 200 时计 1 次；每月自动清零；也可以从 Tavily `GET /usage` 同步真实用量（手动或定时）。同步时每个 Key 之间间隔 `usage_sync.request_interval`（默认 1s）；遇到 429 会立即停止本轮，剩余 Key 记为「跳过」，等下一轮再同步。
+- **额度统计**：非 GET 请求得到 200 时计 1 次；每月自动清零；也可以从 Tavily `GET /usage` 同步真实用量（手动或定时）。同一个 Key、同一个出口 IP 的 usage 请求均至少间隔 60 秒，手动同步和 REST 查询共用持久化限制，重复请求返回 429 和 `Retry-After`。批量同步串行执行，每个 Key 间隔至少 60 秒，遇到 429 停止本轮；自动同步默认关闭，开启后也不会在启动时立即执行。usage 请求不换 Key 重试。
+- **Hysteria2 出口池**：每个 Key 固定绑定一个出口，首次导入和新增 Key 分配到 Key 数最少的出口。绑定随状态保存，普通 API、MCP 搜索/抓取及 usage 同步走同一出口。启用出口池后，代理故障不会回退到直连。
 - **认证**：Master Key 可以放在 `Authorization: Bearer`、query `api_key` / `apiKey` 或 JSON body 的 `api_key` / `apiKey` 中。转发前会去掉 Master Key，换成池里的 Key。比较使用常量时间。
 - **管理后台**（`/admin`）：总览、导入 / 编辑 / 启用 / 禁用 / 删除 Key、复制完整 Key、单个或批量同步用量、重置用量、清理失效 Key、导出。
 - **MCP 端点**（`/mcp`）：无状态的 Streamable HTTP，提供 `tavily-search`、`tavily-extract`、`tavily-crawl`、`tavily-map`、`tavily-usage` 五个工具，调用同样走 Key 池和故障切换。
@@ -61,6 +62,35 @@ docker run -d -p 8080:8080 -e MASTER_KEY=... -v tavily-data:/app/data tavily-lb
 Key 文件格式见 [`keys.example.txt`](keys.example.txt)：每行 `key`、`key,别名` 或 `key,别名,月额度`。
 
 状态文件（默认 `./data/state.json`）里有所有 Key 和自动生成的 Master Key。它采用原子写入，每 `flush_interval`（10s）写一次，修改操作后和退出时也会写。请妥善保管这个文件。
+
+## Hysteria2 出口池
+
+需要官方 [Hysteria 2 客户端](https://v2.hysteria.network/docs/getting-started/Installation/)、Python 3、PyYAML 和 curl。Rust 服务通过每个客户端的本地 SOCKS5 端口转发 HTTPS，协议连接由官方客户端处理。
+
+```powershell
+python scripts/prepare_hysteria.py --source "C:\path\nodes.yaml" --binary "C:\path\hysteria.exe" --output data/hysteria/nodes
+```
+
+此脚本读取 Clash YAML 中的 `hysteria2` 节点，串行启动并通过 IP 查询服务检查真实出口；不读取 Tavily Key、不调用 Tavily。失败节点和重复公网 IP 不会进入生成的 `data/hysteria/nodes/egress.toml`。将其中内容追加到根目录 `config.toml`，设置 `keys_file = "./keys.txt"`（放在所有 TOML 表之前），再启动服务。已有输出不会覆盖，重新准备时使用新目录。
+
+服务自动启动配置中的 Hysteria 客户端，正常退出时回收进程。配置文件使用 JSON，字段见[官方客户端配置](https://v2.hysteria.network/docs/advanced/Full-Client-Config/)。客户端只监听回环地址；已有进程占用端口时启动失败，不接管未知监听者。服务被强制终止时，需先清理遗留的 Hysteria 子进程再启动。
+
+`/api/keys` 返回每个 Key 的 `egress_id`，`/api/settings` 中的 `config.egress.nodes` 可查对应公网 IP。新增 Key 均匀分配，已绑定的 Key 不因删除其它 Key 或重启而迁移；移除仍被引用的出口会阻止启动。出口 IP 是准备时实测值，节点 IP 变化后需停止服务、重新检查并更新配置。
+
+usage 限频保存在状态文件旁的 `state.usage.json`，按 Key 摘要和 IP 分别计时，在发送请求前写入。运行时使用单调时钟防止系统校时绕过限制；重启后持久化记录至少再冷却 60 秒。迁移时连同状态文件保留此文件，不要同时运行使用同一组 Key 的其它实例。相同状态路径有进程独占锁；不同状态目录和其它工具之间不共享限频记录。MCP `tavily-usage` 只读取本地汇总，不请求上游。
+
+真实账号验证请仅串行做少量 search/extract 请求，建议设置 `max_attempts = 1`，不要运行旧的 `web/e2e-live` 批量套件。明确 401 的 Key 会被标记失效、禁用并排除，432/433 标记额度耗尽；代理超时不代表 Key 无效。未实际使用的 Key 不会为了检查而批量访问 Tavily。
+
+## Agent 的 web search / web fetch
+
+请求均使用 `Authorization: Bearer <Master Key>`，不要向 agent 暴露上游 Key。
+
+| Agent 工具 | REST 请求 | MCP 工具 |
+|---|---|---|
+| web search | `POST /search`，`{"query":"查询内容","max_results":3}` | `tavily-search` |
+| web fetch | `POST /extract`，`{"urls":["https://example.com"],"format":"markdown"}` | `tavily-extract` |
+
+`/extract` 返回正文提取结果（`results[].raw_content`），失败 URL 在 `failed_results`；它不是任意 HTTP 方法的原始网页代理。MCP 接入地址为 `http://127.0.0.1:8080/mcp`。
 
 ## 客户端用法
 

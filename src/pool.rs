@@ -29,6 +29,7 @@ pub struct KeyEntry {
     pub id: u64,
     pub key: String,
     alias: Mutex<String>,
+    egress_id: Mutex<Option<String>>,
     total_quota: AtomicU32,
     used_quota: AtomicU32,
     active: AtomicBool,
@@ -55,6 +56,7 @@ impl KeyEntry {
             id: r.id,
             key: r.key,
             alias: Mutex::new(r.alias),
+            egress_id: Mutex::new(r.egress_id),
             total_quota: AtomicU32::new(r.total_quota),
             used_quota: AtomicU32::new(r.used_quota.min(r.total_quota)),
             active: AtomicBool::new(r.active && !r.invalid),
@@ -74,6 +76,7 @@ impl KeyEntry {
             id: self.id,
             key: self.key.clone(),
             alias: self.alias(),
+            egress_id: self.egress_id(),
             total_quota: self.total_quota(),
             used_quota: self.used_quota(),
             active: self.is_active(),
@@ -85,6 +88,9 @@ impl KeyEntry {
 
     pub fn alias(&self) -> String {
         self.alias.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+    pub fn egress_id(&self) -> Option<String> {
+        self.egress_id.lock().unwrap().clone()
     }
     pub fn total_quota(&self) -> u32 {
         self.total_quota.load(Ordering::Relaxed)
@@ -174,11 +180,26 @@ struct Inner {
     next_id: u64,
     month: Option<String>,
     master_key: Option<String>,
+    egress_ids: Vec<String>,
 }
 
 pub struct Pool {
     inner: RwLock<Inner>,
     dirty: AtomicBool,
+}
+
+fn least_loaded_egress(inner: &Inner) -> Option<String> {
+    inner
+        .egress_ids
+        .iter()
+        .min_by_key(|id| {
+            inner
+                .keys
+                .iter()
+                .filter(|k| k.egress_id().as_ref() == Some(id))
+                .count()
+        })
+        .cloned()
 }
 
 impl Pool {
@@ -195,6 +216,7 @@ impl Pool {
                 next_id: file.next_id.max(max_id + 1),
                 month: file.month,
                 master_key: file.master_key,
+                egress_ids: Vec::new(),
             }),
             dirty: AtomicBool::new(false),
         }
@@ -223,6 +245,29 @@ impl Pool {
 
     pub fn stored_master_key(&self) -> Option<String> {
         self.inner.read().unwrap().master_key.clone()
+    }
+
+    /// Preserve established exits; distribute only unassigned keys to the least loaded exit.
+    pub fn configure_egress(&self, ids: Vec<String>) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().unwrap();
+        for key in &inner.keys {
+            if let Some(id) = key.egress_id() {
+                anyhow::ensure!(
+                    ids.contains(&id),
+                    "key #{} references missing egress {id}",
+                    key.id
+                );
+            }
+        }
+        inner.egress_ids = ids;
+        for key in &inner.keys {
+            if key.egress_id().is_none() {
+                let id = least_loaded_egress(&inner);
+                *key.egress_id.lock().unwrap() = id;
+            }
+        }
+        self.mark_dirty();
+        Ok(())
     }
 
     pub fn set_stored_master_key(&self, key: String) {
@@ -281,6 +326,7 @@ impl Pool {
         let entry = Arc::new(KeyEntry::from_record(KeyRecord {
             id,
             key: key.to_string(),
+            egress_id: least_loaded_egress(&inner),
             alias: alias.to_string(),
             total_quota,
             used_quota: 0,

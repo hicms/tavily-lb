@@ -71,6 +71,7 @@ pub struct KeyDto {
     cooldown_seconds: u64,
     last_used_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    egress_id: Option<String>,
 }
 
 impl KeyDto {
@@ -88,6 +89,7 @@ impl KeyDto {
             cooldown_seconds: k.cooldown_until_ms().saturating_sub(now).div_ceil(1000),
             last_used_at: k.last_used_at(),
             created_at: k.created_at,
+            egress_id: k.egress_id(),
         }
     }
 }
@@ -314,6 +316,7 @@ async fn sync_one(State(app): State<AppState>, Path(id): Path<u64>) -> Response 
     persist(&app).await;
     match result {
         Ok(()) => Json(KeyDto::from_entry(&k, now_ms())).into_response(),
+        Err(crate::usage::UsageError::Gate(e)) => e.response(),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, "sync_failed", &e.to_string()),
     }
 }

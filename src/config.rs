@@ -30,6 +30,7 @@ pub struct Config {
     /// Serves an MCP (streamable HTTP) endpoint at `/mcp`.
     pub mcp: bool,
     pub usage_sync: UsageSyncConfig,
+    pub egress: crate::egress::EgressConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,6 +62,7 @@ impl Default for Config {
             admin_ui: true,
             mcp: true,
             usage_sync: UsageSyncConfig::default(),
+            egress: Default::default(),
         }
     }
 }
@@ -70,7 +72,7 @@ impl Default for UsageSyncConfig {
         Self {
             enabled: false,
             interval: Duration::from_secs(3600),
-            request_interval: Duration::from_secs(1),
+            request_interval: Duration::from_secs(60),
         }
     }
 }
@@ -141,6 +143,10 @@ impl Config {
     }
 
     pub fn validate(&mut self) -> Result<()> {
+        self.egress.validate()?;
+        if self.usage_sync.request_interval < Duration::from_secs(60) {
+            bail!("usage_sync.request_interval must be at least 60s");
+        }
         self.upstream_base_url = self.upstream_base_url.trim_end_matches('/').to_string();
         if !self.upstream_base_url.starts_with("http://")
             && !self.upstream_base_url.starts_with("https://")

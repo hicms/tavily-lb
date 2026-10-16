@@ -54,6 +54,7 @@ fn spawn_usage_sync(app: AppState) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(app.cfg.usage_sync.interval);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tick.tick().await; // Do not query accounts immediately on service startup.
         loop {
             tick.tick().await;
             if app.sync.start(app.clone()).is_err() {

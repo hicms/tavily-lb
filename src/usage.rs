@@ -14,6 +14,10 @@ const MAX_REPORTED_ERRORS: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UsageError {
+    #[error(transparent)]
+    Gate(#[from] crate::usage_gate::GateError),
+    #[error(transparent)]
+    Egress(#[from] anyhow::Error),
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("upstream status {status}: {body}")]
@@ -24,7 +28,10 @@ pub enum UsageError {
 
 impl UsageError {
     pub fn is_rate_limited(&self) -> bool {
-        matches!(self, UsageError::Status { status, .. } if *status == StatusCode::TOO_MANY_REQUESTS)
+        matches!(
+            self,
+            UsageError::Gate(crate::usage_gate::GateError::Limited(_))
+        ) || matches!(self, UsageError::Status { status, .. } if *status == StatusCode::TOO_MANY_REQUESTS)
     }
 }
 
@@ -52,7 +59,7 @@ fn to_u32(v: f64) -> u32 {
 }
 
 /// Returns `(used, limit)` as reported by Tavily `GET /usage`.
-pub async fn fetch_usage(
+async fn fetch_usage(
     client: &reqwest::Client,
     base_url: &str,
     key: &str,
@@ -84,7 +91,9 @@ pub async fn fetch_usage(
 }
 
 pub async fn sync_key(app: &AppState, entry: &KeyEntry) -> Result<(), UsageError> {
-    match fetch_usage(&app.client, &app.cfg.upstream_base_url, &entry.key).await {
+    let (client, exit_ip) = app.egress.route(entry)?;
+    let _permit = app.usage_gate.reserve(&entry.key, exit_ip)?;
+    match fetch_usage(client, &app.cfg.upstream_base_url, &entry.key).await {
         Ok((used, limit)) => {
             app.pool.set_usage(entry, used, limit);
             // Tavily accepted the key, so an earlier 401 (e.g. a revoked-then-restored key) no longer applies.
@@ -163,7 +172,11 @@ impl SyncJob {
     }
 
     async fn run(&self, app: AppState, keys: Vec<Arc<KeyEntry>>) {
-        let interval = app.cfg.usage_sync.request_interval;
+        let interval = app
+            .cfg
+            .usage_sync
+            .request_interval
+            .max(Duration::from_secs(60));
         for (i, key) in keys.iter().enumerate() {
             if i > 0 && !interval.is_zero() {
                 tokio::time::sleep(interval).await;

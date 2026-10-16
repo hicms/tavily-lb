@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::app::AppState;
 use crate::auth;
 use crate::pool::{KeyEntry, now_ms};
+use crate::usage_gate::{GateError, is_usage_url};
 
 pub const X_PROXY_REQUEST_ID: &str = "x-proxy-request-id";
 pub const X_TAVILY_REQUEST_ID: &str = "x-tavily-request-id";
@@ -108,6 +109,7 @@ enum Outcome {
     Timeout,
     TransportError(String),
     NoKeys,
+    UsageBlocked(GateError),
 }
 
 pub async fn forward(app: &AppState, req: Forward) -> Response {
@@ -117,6 +119,7 @@ pub async fn forward(app: &AppState, req: Forward) -> Response {
     let latency_ms = started.elapsed().as_millis() as u64;
 
     let mut resp = match outcome {
+        Outcome::UsageBlocked(e) => e.response(),
         Outcome::Done(up, alias) => {
             info!(%request_id, method = %req.method, path = %req.path, status = up.status.as_u16(), key = %alias, attempts, latency_ms, "proxied");
             upstream_response(up)
@@ -172,6 +175,8 @@ async fn try_keys(
         n => n,
     };
     let url = build_url(&app.cfg.upstream_base_url, &req.path, req.query.as_deref());
+    let usage = is_usage_url(&url);
+    let max = if usage { 1 } else { max };
     let headers = upstream_headers(&req.headers, request_id);
 
     let mut attempts = 0;
@@ -186,18 +191,23 @@ async fn try_keys(
         attempts += 1;
         let timeout = remaining.min(app.cfg.upstream_timeout);
         match send(app, req, &url, &headers, key, timeout).await {
+            Err(SendError::Gate(e)) => return (Outcome::UsageBlocked(e), attempts - 1),
             Err(e) => {
                 warn!(%request_id, key = %key.alias(), error = %e, "upstream attempt failed");
                 last_err = Some(e.to_string());
+            }
+            Ok(up) if usage => {
+                match up.status.as_u16() {
+                    401 => app.pool.mark_invalid(key),
+                    432 | 433 => app.pool.mark_exhausted(key),
+                    _ => {}
+                }
+                return (Outcome::Done(up, key.alias()), attempts);
             }
             Ok(up) => match up.status.as_u16() {
                 401 => {
                     warn!(%request_id, key = %key.alias(), "key rejected with 401, marking invalid");
                     app.pool.mark_invalid(key);
-                }
-                429 if shares_rate_limit(&req.path) => {
-                    warn!(%request_id, key = %key.alias(), path = %req.path, "rate limited on an endpoint whose limit is shared by all keys; not failing over");
-                    return (Outcome::RateLimited(up, key.alias()), attempts);
                 }
                 429 => {
                     warn!(%request_id, key = %key.alias(), "key rate limited");
@@ -230,6 +240,16 @@ async fn try_keys(
     (outcome, attempts)
 }
 
+#[derive(Debug, thiserror::Error)]
+enum SendError {
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+    #[error(transparent)]
+    Egress(#[from] anyhow::Error),
+    #[error(transparent)]
+    Gate(#[from] GateError),
+}
+
 async fn send(
     app: &AppState,
     req: &Forward,
@@ -237,9 +257,14 @@ async fn send(
     headers: &HeaderMap,
     key: &KeyEntry,
     timeout: Duration,
-) -> Result<Upstream, reqwest::Error> {
-    let mut builder = app
-        .client
+) -> Result<Upstream, SendError> {
+    let (client, exit_ip) = app.egress.route(key)?;
+    let _permit = if is_usage_url(url) {
+        Some(app.usage_gate.reserve(&key.key, exit_ip)?)
+    } else {
+        None
+    };
+    let mut builder = client
         .request(req.method.clone(), url)
         .headers(headers.clone())
         .bearer_auth(&key.key)
@@ -256,13 +281,6 @@ async fn send(
         headers,
         body,
     })
-}
-
-/// Tavily limits `GET /usage` per client rather than per key: in live testing every key got
-/// 429 at the same moment. Cooling keys down or retrying with other keys would only add load
-/// and block unrelated search traffic.
-fn shares_rate_limit(path: &str) -> bool {
-    path.trim_end_matches('/') == "/usage"
 }
 
 fn build_url(base: &str, path: &str, query: Option<&str>) -> String {

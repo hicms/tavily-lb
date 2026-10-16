@@ -25,6 +25,8 @@ pub struct StoreFile {
 pub struct KeyRecord {
     pub id: u64,
     pub key: String,
+    #[serde(default)]
+    pub egress_id: Option<String>,
     pub alias: String,
     pub total_quota: u32,
     pub used_quota: u32,
@@ -61,15 +63,18 @@ pub fn load(path: &Path) -> Result<StoreFile> {
 }
 
 pub fn save(path: &Path, file: &StoreFile) -> Result<()> {
+    write_atomic(path, &serde_json::to_vec_pretty(file)?)
+}
+
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    let data = serde_json::to_vec_pretty(file)?;
     let tmp = tmp_path(path);
     {
         let mut f =
             std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(&data)?;
+        f.write_all(data)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
@@ -143,6 +148,7 @@ mod tests {
             keys: vec![KeyRecord {
                 id: 1,
                 key: "tvly-abc".into(),
+                egress_id: None,
                 alias: "a".into(),
                 total_quota: 1000,
                 used_quota: 5,

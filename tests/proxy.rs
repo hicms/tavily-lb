@@ -640,20 +640,15 @@ async fn admin_sync_one_applies_upstream_usage() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(bad.is_invalid());
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(!bad.is_invalid());
+    assert_eq!(up.calls().len(), 1);
 }
 
 #[tokio::test]
 async fn admin_sync_all_runs_in_background() {
     let up = upstream(|_| (200, r#"{"key":{"usage":7,"limit":100}}"#.into())).await;
-    let (app, _d) = app_with(
-        &up.url,
-        &[("tvly-a-0000000000", 1000), ("tvly-b-0000000000", 1000)],
-        |c| {
-            c.usage_sync.request_interval = Duration::ZERO;
-        },
-    );
+    let (app, _d) = app_with(&up.url, &[("tvly-a-0000000000", 1000)], |_| {});
     let (status, _, _) = call(&app, admin(Method::POST, "/api/sync", None, Some(MASTER))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     for _ in 0..50 {
@@ -664,7 +659,7 @@ async fn admin_sync_all_runs_in_background() {
     }
     let st = app.sync.status();
     assert!(!st.running);
-    assert_eq!((st.total, st.succeeded, st.failed), (2, 2, 0));
+    assert_eq!((st.total, st.succeeded, st.failed), (1, 1, 0));
     assert!(
         app.pool
             .list()
@@ -683,9 +678,7 @@ async fn sync_all_stops_at_the_first_429() {
             ("tvly-b-0000000000", 1000),
             ("tvly-c-0000000000", 1000),
         ],
-        |c| {
-            c.usage_sync.request_interval = Duration::ZERO;
-        },
+        |_| {},
     );
     let (status, _, _) = call(&app, admin(Method::POST, "/api/sync", None, Some(MASTER))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -719,6 +712,7 @@ async fn state_survives_restart() {
         data_file: dir.path().join("state.json"),
         ..Config::default()
     };
+    drop(app);
     let again = AppState::build(cfg).unwrap();
     let k = key_by(&again, "tvly-a-0000000000");
     assert_eq!(k.used_quota(), 1);
@@ -738,9 +732,11 @@ async fn generated_master_key_is_persisted() {
         tavily_lb::MasterKeySource::Generated
     );
     first.persister.save_now(&first.pool).await.unwrap();
+    let master = first.master_key.clone();
+    drop(first);
     let second = AppState::build(cfg).unwrap();
     assert_eq!(second.master_key_source, tavily_lb::MasterKeySource::Stored);
-    assert_eq!(first.master_key, second.master_key);
+    assert_eq!(master, second.master_key);
 }
 
 #[tokio::test]
@@ -757,6 +753,7 @@ async fn keys_file_is_imported_once() {
     let first = AppState::build(cfg.clone()).unwrap();
     assert_eq!(first.pool.list().len(), 2);
     first.persister.save_now(&first.pool).await.unwrap();
+    drop(first);
     let second = AppState::build(cfg).unwrap();
     assert_eq!(second.pool.list().len(), 2);
     assert_eq!(key_by(&second, "tvly-bbbbbbbbbbbb").total_quota(), 50);

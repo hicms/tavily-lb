@@ -1,6 +1,5 @@
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Json;
@@ -26,7 +25,8 @@ pub struct AppInner {
     pub cfg: Config,
     pub pool: Arc<Pool>,
     pub persister: Persister,
-    pub client: reqwest::Client,
+    pub egress: crate::egress::EgressPool,
+    pub usage_gate: crate::usage_gate::UsageGate,
     pub master_key: String,
     pub master_key_source: MasterKeySource,
     pub sync: Arc<SyncJob>,
@@ -55,8 +55,10 @@ impl AppState {
     /// Loads persisted state, resolves the master key, imports `keys_file`, and catches up a
     /// missed monthly reset. Call `persister.save_now` afterwards to write the result.
     pub fn build(cfg: Config) -> Result<Self> {
+        let usage_gate = crate::usage_gate::UsageGate::open(&cfg.data_file)?;
         let file = store::load(&cfg.data_file)?;
         let pool = Arc::new(Pool::from_store(file));
+        pool.configure_egress(cfg.egress.nodes.iter().map(|n| n.id.clone()).collect())?;
 
         let (master_key, master_key_source) = match (&cfg.master_key, pool.stored_master_key()) {
             (Some(k), _) => (k.trim().to_string(), MasterKeySource::Config),
@@ -70,12 +72,8 @@ impl AppState {
 
         let state = AppState(Arc::new(AppInner {
             persister: Persister::new(cfg.data_file.clone()),
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .pool_idle_timeout(Duration::from_secs(90))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .context("build HTTP client")?,
+            egress: crate::egress::EgressPool::build(&cfg.egress)?,
+            usage_gate,
             pool,
             master_key,
             master_key_source,

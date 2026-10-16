@@ -1,4 +1,6 @@
 /target
+/.plan/
+__pycache__/
 # Runtime state (contains API keys and the master key).
 /data
 config.toml

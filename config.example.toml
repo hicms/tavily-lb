@@ -35,4 +35,13 @@ mcp = true                               # MCP_ENABLED (MCP endpoint at /mcp)
 # Periodically pull real usage from Tavily GET /usage for every key.
 enabled = false                          # USAGE_SYNC_ENABLED
 interval = "1h"                          # USAGE_SYNC_INTERVAL (minimum 60s)
-request_interval = "1s"                  # pause between keys during a sync
+request_interval = "60s"                 # minimum 60s; all usage routes also share a persistent per-key/per-IP gate
+
+# Optional Hysteria2 exits. Generate these with scripts/prepare_hysteria.py.
+# [egress]
+# hysteria_binary = "./data/hysteria/hysteria.exe"
+# [[egress.nodes]]
+# id = "hy2-example"
+# exit_ip = "203.0.113.10"              # actual public exit IP, verified before use
+# proxy_url = "socks5h://127.0.0.1:19080"
+# hysteria_config = "./data/hysteria/hy2-example.json"
