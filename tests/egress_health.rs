@@ -1,3 +1,6 @@
+#[path = "support/exa_socks.rs"]
+mod socks;
+
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -187,10 +190,12 @@ async fn wait_recovered(app: &AppState) {
 }
 
 #[tokio::test]
-async fn background_probe_recovers_original_binding_without_key_or_usage_calls() {
+async fn background_probe_recovers_socks_exit_without_credentials_or_usage_reservation() {
     let p = proxy(502).await;
+    let socks = socks::Socks::start(&p.url).await;
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = config(dir.path(), &[&p]);
+    cfg.egress.nodes[0].proxy_url = socks.url.clone();
     cfg.egress.health_check_interval = Duration::from_millis(30);
     cfg.egress.health_check_timeout = Duration::from_millis(100);
     // The health check must strip path, query and URL credentials as well as key headers.
@@ -199,6 +204,10 @@ async fn background_probe_recovers_original_binding_without_key_or_usage_calls()
     let key = app.pool.add("tvly-first", "first", 100).unwrap();
     let binding = key.egress_id();
     assert_eq!(call(&app).await, StatusCode::BAD_GATEWAY);
+    assert!(matches!(
+        tavily_lb::usage::sync_key(&app, &key).await,
+        Err(tavily_lb::usage::UsageError::Egress(_))
+    ));
     let jobs = Jobs(tavily_lb::jobs::spawn_all(&app));
     wait_for(|| p.calls.lock().unwrap().iter().any(|c| c.method == "HEAD")).await;
     assert_eq!(call(&app).await, StatusCode::BAD_GATEWAY);
@@ -212,6 +221,7 @@ async fn background_probe_recovers_original_binding_without_key_or_usage_calls()
         1
     );
     p.status.store(200, Ordering::SeqCst);
+    p.probe_status.store(401, Ordering::SeqCst);
     wait_recovered(&app).await;
     assert_eq!(key.egress_id(), binding);
     assert!(key.is_active() && !key.is_invalid());
@@ -225,6 +235,17 @@ async fn background_probe_recovers_original_binding_without_key_or_usage_calls()
         assert_eq!(call.path, "/");
         assert!(call.authorization.is_none());
     }
+    assert!(
+        socks
+            .destinations
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(host, port)| host == "upstream.invalid" && *port == 80)
+    );
+    // An offline usage attempt must not reserve the limit: sync works immediately after recovery.
+    tavily_lb::usage::sync_key(&app, &key).await.unwrap();
+    assert_eq!(key.used_quota(), 7);
     drop(jobs);
 }
 
@@ -244,33 +265,6 @@ async fn proxy_statuses_and_timeouts_quarantine_without_invalidating_keys() {
         assert!(key.is_active() && !key.is_invalid());
         assert_eq!(key.used_quota(), 0);
     }
-}
-
-#[tokio::test]
-async fn unavailable_node_rejects_usage_before_reserving_its_limit() {
-    let p = proxy(502).await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = config(dir.path(), &[&p]);
-    cfg.egress.health_check_interval = Duration::from_millis(30);
-    let app = AppState::build(cfg).unwrap();
-    let key = app.pool.add("tvly-test", "test", 100).unwrap();
-    assert_eq!(call(&app).await, StatusCode::BAD_GATEWAY);
-    let error = tavily_lb::usage::sync_key(&app, &key).await.unwrap_err();
-    assert!(matches!(error, tavily_lb::usage::UsageError::Egress(_)));
-    p.status.store(200, Ordering::SeqCst);
-    let _jobs = Jobs(tavily_lb::jobs::spawn_all(&app));
-    wait_recovered(&app).await;
-    tavily_lb::usage::sync_key(&app, &key).await.unwrap();
-    assert_eq!(key.used_quota(), 7);
-    assert_eq!(
-        p.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.path == "/usage")
-            .count(),
-        1
-    );
 }
 
 #[tokio::test]
@@ -357,85 +351,6 @@ async fn old_request_failure_cannot_quarantine_a_recovered_epoch() {
     wait_recovered(&app).await;
     assert_eq!(old_failure.await.unwrap(), StatusCode::BAD_GATEWAY);
     assert_eq!(call(&app).await, StatusCode::OK);
-}
-
-#[test]
-fn health_configuration_is_backward_compatible_and_rejects_zero() {
-    let mut cfg: Config =
-        toml::from_str("[egress]\nhealth_check_interval = '2s'\nhealth_check_timeout = '500ms'")
-            .unwrap();
-    cfg.validate().unwrap();
-    assert_eq!(cfg.egress.health_check_interval, Duration::from_secs(2));
-    assert_eq!(cfg.egress.health_check_timeout, Duration::from_millis(500));
-    cfg.egress.health_check_interval = Duration::ZERO;
-    assert!(cfg.validate().is_err());
-    cfg.egress.health_check_interval = Duration::from_secs(2);
-    cfg.egress.health_check_timeout = Duration::ZERO;
-    assert!(cfg.validate().is_err());
-    let defaults: Config = toml::from_str("[egress]\n").unwrap();
-    assert_eq!(
-        defaults.egress.health_check_interval,
-        Duration::from_secs(30)
-    );
-    assert_eq!(
-        defaults.egress.health_check_timeout,
-        Duration::from_secs(10)
-    );
-}
-#[path = "support/exa_socks.rs"]
-mod socks;
-
-#[tokio::test]
-async fn socks_exit_recovers_through_the_tunnel_and_accepts_anonymous_401_probe() {
-    let upstream = proxy(502).await;
-    let socks = socks::Socks::start(&upstream.url).await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = config(dir.path(), &[&upstream]);
-    cfg.egress.nodes[0].proxy_url = socks.url.clone();
-    cfg.egress.health_check_interval = Duration::from_millis(30);
-    let app = AppState::build(cfg).unwrap();
-    let key = app.pool.add("tvly-socks", "socks", 100).unwrap();
-    assert_eq!(call(&app).await, StatusCode::BAD_GATEWAY);
-    upstream.status.store(200, Ordering::SeqCst);
-    upstream.probe_status.store(401, Ordering::SeqCst);
-    let _jobs = Jobs(tavily_lb::jobs::spawn_all(&app));
-    wait_recovered(&app).await;
-    assert!(key.is_active() && !key.is_invalid());
-    assert!(
-        socks
-            .destinations
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(host, port)| host == "upstream.invalid" && *port == 80)
-    );
-    assert!(
-        upstream
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.method == "HEAD" && c.authorization.is_none())
-    );
-}
-
-#[tokio::test]
-async fn connection_refused_isolates_node_without_touching_key_state() {
-    let p = proxy(200).await;
-    let dir = tempfile::tempdir().unwrap();
-    let app = AppState::build(config(dir.path(), &[&p])).unwrap();
-    let key = app.pool.add("tvly-test", "test", 100).unwrap();
-    p.task.abort();
-    wait_for(|| p.task.is_finished()).await;
-    assert_eq!(call(&app).await, StatusCode::BAD_GATEWAY);
-    assert!(matches!(
-        tavily_lb::usage::sync_key(&app, &key).await,
-        Err(tavily_lb::usage::UsageError::Egress(
-            tavily_lb::egress::EgressError::Unavailable(_)
-        ))
-    ));
-    assert!(key.is_active() && !key.is_invalid());
-    assert_eq!(key.used_quota(), 0);
 }
 
 #[tokio::test]

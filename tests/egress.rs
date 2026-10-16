@@ -188,7 +188,7 @@ async fn failed_exit_never_falls_back_to_direct_connection() {
     let mut cfg = config(dir.path(), &[&dead]);
     cfg.upstream_base_url = direct.url.clone();
     let app = AppState::build(cfg).unwrap();
-    app.pool.add("tvly-test-key", "test", 100).unwrap();
+    let key = app.pool.add("tvly-test-key", "test", 100).unwrap();
     dead.task.abort();
     tokio::task::yield_now().await;
     assert_eq!(
@@ -196,6 +196,8 @@ async fn failed_exit_never_falls_back_to_direct_connection() {
         StatusCode::BAD_GATEWAY
     );
     assert!(direct.calls.lock().unwrap().is_empty());
+    assert!(key.is_active() && !key.is_invalid());
+    assert_eq!(key.used_quota(), 0);
 }
 
 #[tokio::test]
@@ -323,6 +325,12 @@ async fn duplicate_ips_missing_persisted_exit_and_short_sync_intervals_are_rejec
     assert!(bad.validate().is_err());
     bad = cfg.clone();
     bad.usage_sync.request_interval = Duration::from_secs(59);
+    assert!(bad.validate().is_err());
+    bad = cfg.clone();
+    bad.egress.health_check_interval = Duration::ZERO;
+    assert!(bad.validate().is_err());
+    bad = cfg.clone();
+    bad.egress.health_check_timeout = Duration::ZERO;
     assert!(bad.validate().is_err());
     let app = AppState::build(cfg.clone()).unwrap();
     app.pool.add("tvly-test-key", "test", 100).unwrap();
