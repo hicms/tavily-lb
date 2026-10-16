@@ -111,6 +111,7 @@ async fn healthz() -> Json<serde_json::Value> {
 pub fn router(app: AppState) -> Router {
     let mut r = Router::new()
         .route("/healthz", get(healthz))
+        .nest("/exa", crate::exa::router())
         .nest("/api", admin::router(app.clone()));
     if app.cfg.admin_ui {
         r = r

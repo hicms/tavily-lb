@@ -3,6 +3,7 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod egress;
+mod exa;
 mod hysteria;
 pub mod jobs;
 pub mod mcp;

@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **透明代理**：除 `/api`、`/admin`、`/mcp`、`/healthz` 外的所有路径（`/search`、`/extract`、`/crawl`、`/map`、`/usage` 等）原样转发给 Tavily，方法、query、body、响应头和状态码保持不变。
+- **透明代理**：除 `/api`、`/admin`、`/mcp`、`/exa`、`/healthz` 外的所有路径（`/search`、`/extract`、`/crawl`、`/map`、`/usage` 等）原样转发给 Tavily，方法、query、body、响应头和状态码保持不变。
 - **选 Key 策略**：只使用「启用、未失效、剩余额度 > 0」的 Key；先随机打乱，再按剩余额度从高到低排序，刚触发 429 的 Key 排到最后。
 - **故障切换**：
 
@@ -118,6 +118,65 @@ MCP（Claude Code、Cursor 等支持 Streamable HTTP 的客户端）：
   }
 }
 ```
+
+## Exa 兼容接口
+
+`POST /exa/search` 和 `POST /exa/contents` 接受 Exa 格式的 JSON，请求实际由 Tavily 执行，结果组装为 Exa 的返回结构。支持自定义 Base URL 的客户端可使用 `http://127.0.0.1:8080/exa`，API Key 填本服务的 Master Key。认证支持 `x-api-key` 和 `Authorization: Bearer`；同时提供时必须都正确。仅接收未压缩的 `application/json`，参数放在 body 中。
+
+```bash
+curl http://127.0.0.1:8080/exa/search \
+  -H "x-api-key: $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"rust async runtime","numResults":3,"contents":{"highlights":true}}'
+
+curl http://127.0.0.1:8080/exa/contents \
+  -H "x-api-key: $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"urls":["https://example.com"],"text":{"maxCharacters":4000}}'
+```
+
+支持的参数子集：
+
+| 接口 | 参数 | 行为与限制 |
+|---|---|---|
+| Search | `query`、`numResults` | 默认 10 条，支持 1–20 条；超过上游上限明确返回 400 |
+| Search | `type` | `auto`（默认）、`fast`、`instant` 分别使用 Tavily `basic`、`fast`、`ultra-fast`，搜索排序与 Exa 不等价 |
+| Search | `includeDomains`、`excludeDomains` | 最多 300 / 150 个普通主机名；不支持路径或通配符 |
+| Search | `category`、`moderation` | 仅支持 `category: "news"`；`moderation` 转为 `safe_search` |
+| Search | `contents.text`、`contents.highlights` | 未请求 contents 时只返回元数据；内容选项见下文 |
+| Contents | `urls` 或 `ids` | 两者选一，1–100 个 HTTP(S) URL；`ids` 可使用本服务返回的 URL 型 ID，不支持 Exa 私有的非 URL ID |
+| Contents | `text`、`highlights` | 均未指定（或为 null）时默认正文；显式 false 不触发默认正文 |
+
+`text` 支持 boolean 或 `{ "maxCharacters": 4000, "includeHtmlTags": false }`。`highlights` 支持 boolean 或 `{ "query": "关注的问题", "maxCharacters": 2000 }`。字符上限为 1–1000000，按 Unicode 字符截断。Search 的内容参数位于 `contents` 内；Contents 的内容参数位于顶层。
+
+正文来自 `raw_content`，不会用搜索摘要代替缺失正文。Search 的普通 highlights 来自 Tavily 搜索片段；显式 `highlights.query` 通过额外的 extract 请求选取相关片段。Contents highlights 使用 extract 的 query 排序片段；未给 query 时使用 “Key information and main points”。同时请求 text 和 highlights 会分别提取全文和片段，产生额外上游请求。片段选择与 Exa 的模型不等价，不返回伪造的 `highlightScores` 或 `costDollars`。
+
+Contents 每批最多 20 个 URL，串行执行，整个请求（含重试和多次提取）共用 `request_deadline`。返回 `results` 和逐输入 URL 的 `statuses`；单页失败为 `status: "error"`、`error.tag: "CRAWL_ERROR"`，全部页面失败也可返回 HTTP 200。没有标题时用 URL 作为 `title`；未知的作者、抓取来源或费用不编造。上游整次请求失败或总超时返回错误，不会把已完成的部分批次作为完整成功返回。
+
+成功和错误均有 `requestId`、`x-request-id` 和 `x-proxy-request-id`；错误体为 `{ "requestId": "...", "error": "...", "tag": "..." }`。Exa 请求 ID 标识整个适配请求，底层每次转发保留自己的日志 ID。上游 429 保留 `Retry-After`（如果存在）；上游请求失败的错误体不会原样回传。未知参数、`deep`/`neural` 等其它搜索模式、日期过滤、`summary`、`outputSchema`、`livecrawl`、`maxAgeHours`、子页面、HTML/页面区块选项等均返回 400，客户端不应把本接口视为 Exa 的完整功能实现。
+
+两个接口复用原 `proxy::forward`，保持现有 Key 选择、故障切换、冷却、用量计数、Hysteria2 出口绑定及不回退直连的规则；一次 Exa 请求产生多次成功上游调用时按原规则逐次计数。原 Tavily REST、MCP、管理接口不变。不会持久化请求或响应正文。
+
+协议依据：[Exa 官方 OpenAPI](https://exa.ai/docs/exa-spec.json)。`tests/fixtures/exa-contract.json` 保存了 2026-10-16 官方定义中相关 schema 的完整依赖闭包，用于真实本地 HTTP 响应校验（仅访问 mock 上游）：
+
+```powershell
+cargo build --locked
+python -m pip install jsonschema  # 测试依赖；已安装时跳过
+python tests/test_exa_contract.py
+```
+
+已用官方 `exa-py 2.25.0` 验证 search、get_contents 及返回解析。示例：
+
+```python
+import os
+from exa_py import Exa
+
+exa = Exa(api_key=os.environ["MASTER_KEY"], base_url="http://127.0.0.1:8080/exa")
+hits = exa.search("rust async runtime", num_results=3, contents={"highlights": True})
+pages = exa.get_contents(hits.results, text={"maxCharacters": 4000})
+```
+
+安装 `exa-py` 后，可运行 `python tests/test_exa_contract.py --sdk` 追加官方 SDK 联调测试。SDK 自带的默认内容选项可能与原始 REST 请求不同；适配层按 SDK 实际发出的请求执行。
 
 ## 管理 API
 
