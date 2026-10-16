@@ -10,6 +10,10 @@ const MONTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn spawn_all(app: &AppState) -> Vec<JoinHandle<()>> {
     let mut tasks = vec![spawn_flush(app.clone())];
+    tasks.extend(
+        app.egress
+            .spawn_health_checks(&app.cfg.upstream_base_url, &app.cfg.egress),
+    );
     if app.cfg.monthly_reset {
         tasks.push(spawn_month_watch(app.clone()));
     }

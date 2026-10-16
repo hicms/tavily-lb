@@ -1,11 +1,17 @@
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-pub(crate) struct HysteriaProcess(Child);
+pub(crate) struct HysteriaProcess {
+    child: Child,
+    binary: PathBuf,
+    config: PathBuf,
+    proxy: String,
+    id: String,
+}
 
 impl HysteriaProcess {
     pub fn start(binary: &Path, config: &Path, proxy: &str, id: &str) -> Result<Self> {
@@ -50,14 +56,18 @@ impl HysteriaProcess {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        let mut child = Self(
-            command
+        let mut child = Self {
+            child: command
                 .spawn()
                 .with_context(|| format!("start Hysteria egress {id}"))?,
-        );
+            binary: binary.to_owned(),
+            config: config.to_owned(),
+            proxy: proxy.to_owned(),
+            id: id.to_owned(),
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(status) = child.0.try_wait()? {
+            if let Some(status) = child.child.try_wait()? {
                 bail!("Hysteria egress {id} exited with {status}");
             }
             if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
@@ -70,11 +80,19 @@ impl HysteriaProcess {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+
+    pub fn ensure_running(&mut self) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            tracing::warn!(egress = %self.id, %status, "restarting exited Hysteria client");
+            *self = Self::start(&self.binary, &self.config, &self.proxy, &self.id)?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for HysteriaProcess {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

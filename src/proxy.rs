@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::auth;
+use crate::egress::{EgressError, EgressResponse as Upstream, Route};
 use crate::pool::{KeyEntry, now_ms};
 use crate::usage_gate::{GateError, is_usage_url};
 
@@ -97,12 +98,6 @@ pub struct Forward {
     pub body: Bytes,
 }
 
-struct Upstream {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: Bytes,
-}
-
 enum Outcome {
     Done(Upstream, String),
     RateLimited(Upstream, String),
@@ -183,14 +178,24 @@ async fn try_keys(
     let mut last_429: Option<(Upstream, String)> = None;
     let mut last_err: Option<String> = None;
 
-    for key in candidates.iter().take(max) {
+    for key in &candidates {
+        if attempts >= max {
+            break;
+        }
+        let route = match app.egress.route(key) {
+            Ok(route) => route,
+            Err(e) => {
+                last_err = Some(e.to_string());
+                continue;
+            }
+        };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         attempts += 1;
         let timeout = remaining.min(app.cfg.upstream_timeout);
-        match send(app, req, &url, &headers, key, timeout).await {
+        match send(app, req, &url, &headers, key, timeout, route).await {
             Err(SendError::Gate(e)) => return (Outcome::UsageBlocked(e), attempts - 1),
             Err(e) => {
                 warn!(%request_id, key = %key.alias(), error = %e, "upstream attempt failed");
@@ -243,9 +248,7 @@ async fn try_keys(
 #[derive(Debug, thiserror::Error)]
 enum SendError {
     #[error(transparent)]
-    Http(#[from] reqwest::Error),
-    #[error(transparent)]
-    Egress(#[from] anyhow::Error),
+    Egress(#[from] EgressError),
     #[error(transparent)]
     Gate(#[from] GateError),
 }
@@ -257,14 +260,15 @@ async fn send(
     headers: &HeaderMap,
     key: &KeyEntry,
     timeout: Duration,
+    route: Route<'_>,
 ) -> Result<Upstream, SendError> {
-    let (client, exit_ip) = app.egress.route(key)?;
     let _permit = if is_usage_url(url) {
-        Some(app.usage_gate.reserve(&key.key, exit_ip)?)
+        Some(app.usage_gate.reserve(&key.key, route.exit_ip)?)
     } else {
         None
     };
-    let mut builder = client
+    let mut builder = route
+        .client
         .request(req.method.clone(), url)
         .headers(headers.clone())
         .bearer_auth(&key.key)
@@ -272,15 +276,7 @@ async fn send(
     if !req.body.is_empty() {
         builder = builder.body(req.body.clone());
     }
-    let resp = builder.send().await?;
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let body = resp.bytes().await?;
-    Ok(Upstream {
-        status,
-        headers,
-        body,
-    })
+    Ok(route.send(builder).await?)
 }
 
 fn build_url(base: &str, path: &str, query: Option<&str>) -> String {

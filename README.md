@@ -12,13 +12,14 @@
 
   | 上游结果 | 处理 |
   |---|---|
-  | 网络错误 / 超时 | 换下一个 Key |
+  | 网络错误 / 超时 | 换下一个 Key；使用出口池时隔离该节点，跳过其绑定的所有 Key |
+  | 代理模式的 407 / 502 / 503 / 504 | 隔离该节点并换下一个可用出口的 Key，不标记 Key 失效 |
   | 401 | 标记 Key 失效，换下一个 |
   | 429 | 冷却 `cooldown_on_429`（默认 60s），换下一个；全部 429 时返回最后一个 429。例外：`GET /usage` 的限流由所有 Key 共享，收到 429 直接返回，不冷却、不换 Key |
   | 432 / 433 | 标记额度耗尽，换下一个 |
   | 其它状态码 | 直接返回给客户端 |
 
-  每个请求最多尝试 `max_attempts` 个 Key（默认 5），总时长不超过 `request_deadline`（默认 180s）。都失败时返回：最后一个 429，或 `504 upstream_timeout`、`502 upstream_error`、`503 no_available_keys`。
+  每个请求最多尝试 `max_attempts` 个 Key（默认 5），总时长不超过 `request_deadline`（默认 180s）。已隔离节点上的 Key 会被跳过，不占尝试次数；本次实际发生的失败仍计一次。都失败时返回：最后一个 429，或 `504 upstream_timeout`、`502 upstream_error`、`503 no_available_keys`；有可用 Key 但其出口全部被隔离时返回 502。
 - **额度统计**：非 GET 请求得到 200 时计 1 次；每月自动清零；也可以从 Tavily `GET /usage` 同步真实用量（手动或定时）。同一个 Key、同一个出口 IP 的 usage 请求均至少间隔 60 秒，手动同步和 REST 查询共用持久化限制，重复请求返回 429 和 `Retry-After`。批量同步串行执行，每个 Key 间隔至少 60 秒，遇到 429 停止本轮；自动同步默认关闭，开启后也不会在启动时立即执行。usage 请求不换 Key 重试。
 - **Hysteria2 出口池**：每个 Key 固定绑定一个出口，首次导入和新增 Key 分配到 Key 数最少的出口。绑定随状态保存，普通 API、MCP 搜索/抓取及 usage 同步走同一出口。启用出口池后，代理故障不会回退到直连。
 - **认证**：Master Key 可以放在 `Authorization: Bearer`、query `api_key` / `apiKey` 或 JSON body 的 `api_key` / `apiKey` 中。转发前会去掉 Master Key，换成池里的 Key。比较使用常量时间。
@@ -74,6 +75,12 @@ python scripts/prepare_hysteria.py --source "C:\path\nodes.yaml" --binary "C:\pa
 此脚本读取 Clash YAML 中的 `hysteria2` 节点，串行启动并通过 IP 查询服务检查真实出口；不读取 Tavily Key、不调用 Tavily。失败节点和重复公网 IP 不会进入生成的 `data/hysteria/nodes/egress.toml`。将其中内容追加到根目录 `config.toml`，设置 `keys_file = "./keys.txt"`（放在所有 TOML 表之前），再启动服务。已有输出不会覆盖，重新准备时使用新目录。
 
 服务自动启动配置中的 Hysteria 客户端，正常退出时回收进程。配置文件使用 JSON，字段见[官方客户端配置](https://v2.hysteria.network/docs/advanced/Full-Client-Config/)。客户端只监听回环地址；已有进程占用端口时启动失败，不接管未知监听者。服务被强制终止时，需先清理遗留的 Hysteria 子进程再启动。
+
+运行期间，连接失败、超时、响应读取中断，以及代理模式的 407/502/503/504 会立即隔离整个出口。普通请求、MCP、Exa 和用量同步共享此状态；隔离期间跳过该出口的所有 Key，不修改 Key 的启用、失效、额度和固定绑定，不回退直连。上游 502/503/504 也可能触发保守隔离；真实完整的 401 响应仍标记对应 Key 失效，429 仍按原有限流规则处理。
+
+每个节点有独立后台探测：启动后立即探测，之后默认每 30 秒通过该节点发送一次无凭证 `HEAD` 到上游域名的根路径，单次超时 10 秒。探测不携带 Key，不访问 `/usage`，不执行计费搜索；只接受非 5xx、非 407 的 HTTP 响应作为链路恢复证据（包括无需凭证的 401/404/405/429），不跟随重定向。恢复后自动重新启用该出口。托管 Hysteria 子进程退出后会在探测时尝试重启，代理链路探测通过后才解除隔离；由外部管理的代理进程须由其管理器恢复。
+
+可在 `[egress]` 设置 `health_check_interval = "30s"` 和 `health_check_timeout = "10s"`，两者必须大于零。日志记录隔离、恢复和进程重启。隔离状态仅保存在内存，服务重启后重新检测；已在途请求不取消。配置错误、初次托管进程启动失败或监听端口冲突仍会阻止服务启动。
 
 `/api/keys` 返回每个 Key 的 `egress_id`，`/api/settings` 中的 `config.egress.nodes` 可查对应公网 IP。新增 Key 均匀分配，已绑定的 Key 不因删除其它 Key 或重启而迁移；移除仍被引用的出口会阻止启动。出口 IP 是准备时实测值，节点 IP 变化后需停止服务、重新检查并更新配置。
 

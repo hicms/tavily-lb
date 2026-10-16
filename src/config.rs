@@ -153,6 +153,7 @@ impl Config {
         {
             bail!("upstream_base_url must start with http:// or https://");
         }
+        reqwest::Url::parse(&self.upstream_base_url).context("invalid upstream_base_url")?;
         if self.default_total_quota == 0 {
             bail!("default_total_quota must be greater than 0");
         }
@@ -200,7 +201,7 @@ fn parse_bool(s: &str) -> Result<bool> {
     }
 }
 
-fn de_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+pub(crate) fn de_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Raw {
@@ -213,7 +214,7 @@ fn de_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
     }
 }
 
-fn ser_duration<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn ser_duration<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
     if d.subsec_millis() != 0 {
         s.serialize_str(&format!("{}ms", d.as_millis()))
     } else {

@@ -40,6 +40,8 @@ request_interval = "60s"                 # minimum 60s; all usage routes also sh
 # Optional Hysteria2 exits. Generate these with scripts/prepare_hysteria.py.
 # [egress]
 # hysteria_binary = "./data/hysteria/hysteria.exe"
+# health_check_interval = "30s"       # per-node anonymous HEAD probe; must be > 0
+# health_check_timeout = "10s"        # probe timeout; must be > 0
 # [[egress.nodes]]
 # id = "hy2-example"
 # exit_ip = "203.0.113.10"              # actual public exit IP, verified before use

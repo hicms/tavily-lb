@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::app::AppState;
+use crate::egress::{EgressError, Route};
 use crate::pool::KeyEntry;
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -17,9 +18,7 @@ pub enum UsageError {
     #[error(transparent)]
     Gate(#[from] crate::usage_gate::GateError),
     #[error(transparent)]
-    Egress(#[from] anyhow::Error),
-    #[error("request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Egress(#[from] EgressError),
     #[error("upstream status {status}: {body}")]
     Status { status: StatusCode, body: String },
     #[error("unexpected /usage response: {0}")]
@@ -60,18 +59,18 @@ fn to_u32(v: f64) -> u32 {
 
 /// Returns `(used, limit)` as reported by Tavily `GET /usage`.
 async fn fetch_usage(
-    client: &reqwest::Client,
+    route: Route<'_>,
     base_url: &str,
     key: &str,
 ) -> Result<(u32, Option<u32>), UsageError> {
-    let resp = client
+    let request = route
+        .client
         .get(format!("{base_url}/usage"))
         .bearer_auth(key)
-        .timeout(USAGE_TIMEOUT)
-        .send()
-        .await?;
-    let status = resp.status();
-    let body = resp.bytes().await?;
+        .timeout(USAGE_TIMEOUT);
+    let resp = route.send(request).await?;
+    let status = resp.status;
+    let body = resp.body;
     if status != StatusCode::OK {
         let text = String::from_utf8_lossy(&body);
         return Err(UsageError::Status {
@@ -91,9 +90,9 @@ async fn fetch_usage(
 }
 
 pub async fn sync_key(app: &AppState, entry: &KeyEntry) -> Result<(), UsageError> {
-    let (client, exit_ip) = app.egress.route(entry)?;
-    let _permit = app.usage_gate.reserve(&entry.key, exit_ip)?;
-    match fetch_usage(client, &app.cfg.upstream_base_url, &entry.key).await {
+    let route = app.egress.route(entry)?;
+    let _permit = app.usage_gate.reserve(&entry.key, route.exit_ip)?;
+    match fetch_usage(route, &app.cfg.upstream_base_url, &entry.key).await {
         Ok((used, limit)) => {
             app.pool.set_usage(entry, used, limit);
             // Tavily accepted the key, so an earlier 401 (e.g. a revoked-then-restored key) no longer applies.
